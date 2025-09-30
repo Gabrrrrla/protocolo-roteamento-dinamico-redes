@@ -21,7 +21,6 @@ class RouterDaemon:
     def __init__(self, cfg):
         self.cfg = cfg
         self.id = cfg['router_id']
-        # Optional "main" local_ip; individual neighbor entries may have local_ip per-link
         self.local_ip = cfg.get('local_ip', None)
         self.port = cfg.get('port', LSA_FLOOD_PORT)
 
@@ -50,45 +49,40 @@ class RouterDaemon:
         threading.Thread(target=self.recv_loop, daemon=True).start()
         threading.Thread(target=self.hello_loop, daemon=True).start()
 
-        # advertise our links immediately so neighbors learn us
+        # mandando o advertise imediatamente pra que os vizinhos se conheçam
         time.sleep(0.5)
         self.advertise_links()
 
-        # wait a bit to let LSAs propagate, then attempt to install routes to known networks
-        # (this will ensure host-to-host connectivity automatically)
+        # esperar um pouco pro lsa se proparar e entao tentar instalar as rotas nas redes conhecidas
         threading.Thread(target=self.bootstrap_install_routes, daemon=True).start()
 
         print(f"[{self.id}] Daemon started (port={self.port})")
 
-    # Send REQUEST/INSTALL proactively after a little time to allow LSAs to spread
+    # manda REQUEST/INSTALL dps de um tempo 
     def bootstrap_install_routes(self):
-        time.sleep(2.0)   # small wait for initial HELLO/LSA exchanges
-        # call advertise again to refresh seq
+        time.sleep(2.0)   # tempo pro hello
         self.advertise_links()
         time.sleep(1.0)
 
-        # gather networks from LSDB + own attached networks
+        # pega as redes da lsdb + proprias redes adjacentes
         networks = set(self.attached_networks)
         with self.lsdb_lock:
             for lid, link in self.lsdb.items():
                 if 'network' in link:
                     networks.add(link['network'])
 
-        # For each remote network (not ours), pick a representative host IP and try to install route
+        # pra cada, pega um ip de host e tenta instalar a rota
         for net in networks:
             try:
-                # skip own networks
+                # pula a si proprio
                 if net in self.attached_networks:
                     continue
-                # pick first usable host IP in the net (avoid network/broadcast)
                 netobj = ipaddress.ip_network(net)
-                # ensure net size >= 4 to have usable hosts; for /24 it's fine
                 try:
                     candidate = str(list(netobj.hosts())[0])
                 except Exception:
-                    # fallback: use network + 1
                     candidate = str(netobj.network_address + 1)
-                # compute path and install if possible
+                # computa o caminho
                 path = self.compute_cspf(candidate, bw_required=0)
                 if path:
                     print(f"[{self.id}] bootstrap installing route to network of {candidate} via path {path}")
@@ -135,7 +129,7 @@ class RouterDaemon:
 
     # --------------------- LSA flood / advertise ---------------------
     def flood_lsa(self, lsa, exclude_ip=None):
-        # Flood LSA to all neighbors except exclude_ip
+        # inunda lsa pra todos os vizinhos 
         lsa_json = json.dumps(lsa)
         for n in self.cfg.get('neighbors', []):
             if n.get('ip') == exclude_ip:
@@ -146,7 +140,7 @@ class RouterDaemon:
                 print(f"[{self.id}] flood err to {n.get('ip')}: {e}")
 
     def advertise_links(self):
-        # build LSA with local links + attached networks
+        # cria o lsa com links locais e as attached networks
         lsa = {
             "type":"LSA_LINK",
             "origin":self.id,
@@ -154,7 +148,6 @@ class RouterDaemon:
             "links":[]
         }
         for n in self.cfg.get('neighbors', []):
-            # use neighbor-provided local_ip (this router's interface IP on that link)
             local_iface_ip = n.get('local_ip', self.local_ip)
             remote_iface_ip = n['ip']
             link = {
@@ -168,7 +161,6 @@ class RouterDaemon:
                 "ip_b": remote_iface_ip
             }
             lsa['links'].append(link)
-        # attached networks: advertise networks this router serves
         for net in self.attached_networks:
             lsa['links'].append({
                 "id": f"{self.id}-net-{net}",
@@ -176,14 +168,12 @@ class RouterDaemon:
                 "b": "NET",
                 "network": net
             })
-        # send to neighbors
+        # manda pros vizinhos
         print(f"[{self.id}] advertising LSA (links={len(lsa['links'])})")
         self.flood_lsa(lsa)
 
     # --------------------- message handling ---------------------
     def handle_msg(self, msg, addr):
-        # prints for debugging
-        # print(f"[{self.id}] recv {msg} from {addr}")
         mtype = msg.get('type')
 
         if mtype == 'HELLO':
@@ -236,20 +226,18 @@ class RouterDaemon:
                     pass
             return
 
-        # *** CORREÇÃO APLICADA AQUI ***
         if mtype == 'INSTALL_ROUTE':
-            dest_network = msg.get('dest') # O destino agora é a rede (ex: "10.0.3.0/24")
+            dest_network = msg.get('dest') 
             next_hop = msg.get('next')
             print(f"[{self.id}] INSTALL_ROUTE received: install {dest_network} via {next_hop}")
-            self.install_kernel_route(dest_network, next_hop) # Chama a função corrigida
+            self.install_kernel_route(dest_network, next_hop) 
             return
 
-        # unknown
         print(f"[{self.id}] unknown msg type: {mtype} from {addr}")
 
     # --------------------- CSPF / path computation ---------------------
     def compute_cspf(self, dest_ip, bw_required):
-        # Find destination router by scanning LSDB attached networks
+        # acha o destino procurando na lsdb das attached networks
         dest_router = None
         with self.lsdb_lock:
             for lid, link in self.lsdb.items():
@@ -257,11 +245,11 @@ class RouterDaemon:
                     try:
                         net = ipaddress.ip_network(link['network'])
                         if ipaddress.ip_address(dest_ip) in net:
-                            dest_router = link['a']  # the router that announced the attached network
+                            dest_router = link['a'] 
                             break
                     except Exception:
                         continue
-            # local check: maybe the dest is local attached
+            # verifica se nao esta talvez nas attached
             if not dest_router:
                 for net in self.attached_networks:
                     try:
@@ -272,7 +260,6 @@ class RouterDaemon:
                         pass
 
         if not dest_router:
-            # not known yet
             # print(f"[{self.id}] destination router not found in LSDB for {dest_ip}")
             return None
 
@@ -291,9 +278,9 @@ class RouterDaemon:
                     continue
                 cost = link.get('cost', 1)
                 delay = link.get('delay', 1)
-                metric = cost + (delay / 100.0) + (1.0 / max(avail, 1))
-                ip_a = link.get('ip_a')   # IP of a-side interface
-                ip_b = link.get('ip_b')   # IP of b-side interface
+                metric = cost + (delay / 100.0) + (1.0 / max(avail, 1)) # aqui que é onde o negocio fica interessante
+                ip_a = link.get('ip_a')
+                ip_b = link.get('ip_b') 
                 # store edges carrying also the interface IP to use as next-hop
                 graph.setdefault(a, []).append((b, metric, lid, ip_b))  # to reach b, next hop ip is ip_b
                 graph.setdefault(b, []).append((a, metric, lid, ip_a))  # to reach a, next hop ip is ip_a
@@ -351,7 +338,6 @@ class RouterDaemon:
 
     # --------------------- install path / kernel routes ---------------------
     def install_path(self, path, dest_ip, bw):
-        # Reserve bw on each link in the path (simple additive reservation)
         for i in range(len(path)-1):
             cur = path[i]
             nxt = path[i+1]
@@ -368,31 +354,26 @@ class RouterDaemon:
             if lid:
                 self.reservations[lid] = self.reservations.get(lid, 0) + bw
 
-        # *** CORREÇÃO APLICADA AQUI ***
-        # Now instruct each hop to install a route to dest via its next-hop IP
         for i in range(len(path)-1):
             this_router_id = path[i][0]
-            next_hop_ip = path[i+1][2]  # IP of the next router's interface on the link from current hop
+            next_hop_ip = path[i+1][2] 
             
-            # Converte o IP de destino para o endereço da rede (ex: 10.0.3.10 -> 10.0.3.0/24)
-            # Assumimos /24 para simplificar, o que é correto para a topologia.
+            # converte o IP de destino para o endereço da rede (ex: 10.0.3.10 -> 10.0.3.0/24)
             dest_net = ipaddress.ip_interface(f"{dest_ip}/24").network
 
             if this_router_id == self.id:
-                # install locally directly
                 print(f"[{self.id}] install local route to {dest_net} -> via {next_hop_ip}")
                 self.install_kernel_route(str(dest_net), next_hop_ip) # Envia a rede
             else:
-                # we need to send an INSTALL_ROUTE to that router so it installs the route
-                # find an IP we can reach for that router (choose neighbor mapping or LSDB)
+                # manda um INSTALL_ROUTE pro roteador
+                # acha um ip que dê pra achar o roteador (seja por neighbor mapping ou LSDB)
                 target_ip = None
-                # look into config neighbors for matching id
+                # olha nas config dos neighbors pelo id
                 n = self.neigh_by_id.get(this_router_id)
                 if n:
-                    # send to the IP of the neighbor as seen in config (this is the remote iface IP)
                     target_ip = n.get('ip')
                 if not target_ip:
-                    # fallback: search LSDB for a link entry where a==this_router_id and b==self.id (or inverse)
+                    # fallback: procura lsdb por um link onde a==roteador_id e b==self.id (or inverse)
                     with self.lsdb_lock:
                         for lid, link in self.lsdb.items():
                             if link.get('a') == this_router_id and link.get('b') == self.id:
@@ -402,18 +383,16 @@ class RouterDaemon:
                                 target_ip = link.get('ip_b')
                                 break
                 if target_ip:
-                    # Envia a rede na mensagem em vez do IP de host
+                    # envia a rede na mensagem em vez do IP de host
                     msg = {"type":"INSTALL_ROUTE", "dest": str(dest_net), "next": next_hop_ip}
                     print(f"[{self.id}] sending INSTALL_ROUTE to {this_router_id} ({target_ip}) instructing install {dest_net} via {next_hop_ip}")
                     self.send_msg(msg, target_ip)
                 else:
                     print(f"[{self.id}] cannot find reachable IP to instruct router {this_router_id} to install route for {dest_ip}")
 
-    # *** CORREÇÃO APLICADA AQUI ***
     def install_kernel_route(self, dest_network, next_hop):
-        # Instala a rota para a rede inteira (ex: "10.0.3.0/24")
+        # instala a rota para a rede inteira
         try:
-            # Usa o dest_network diretamente, que já tem o formato "IP/MASK"
             proc = subprocess.run(["ip","route","replace", dest_network, "via", next_hop], capture_output=True, text=True)
             if proc.returncode != 0:
                 print(f"[{self.id}] ip route command failed: {proc.returncode} stdout={proc.stdout} stderr={proc.stderr}")
@@ -428,9 +407,9 @@ if __name__ == "__main__":
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
     cfg = load_config(args.config)
-    # Ensure cfg has local_ip; if not, try to pick default from first neighbor mapping
+    # cfg precisa ter um local_ip, e se nao tiver pega um default do primeiro mapeamento vizinho
     if 'local_ip' not in cfg or not cfg.get('local_ip'):
-        # try to set based on neighbors local_ip fields if present
+        # tentar setar baseado no local_ip dos neighbors
         if cfg.get('neighbors'):
             sample = cfg['neighbors'][0].get('local_ip')
             if sample:
