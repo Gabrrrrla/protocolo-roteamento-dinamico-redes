@@ -1,0 +1,26 @@
+{
+  "router_id": "r2",
+  "local_ip": "10.1.12.2",
+  "port": 50000,
+  "neighbors": [
+    {
+      "id": "r1",
+      "ip": "10.1.12.1",
+      "port": 50000,
+      "if": "r2-eth1",
+      "local_ip": "10.1.12.2",
+      "cost": 1,
+      "capacity": 50
+    },
+    {
+      "id": "r3",
+      "ip": "10.1.23.3",
+      "port": 50000,
+      "if": "r2-eth2",
+      "local_ip":"10.1.23.2",
+      "cost": 1,
+      "capacity": 10
+    }
+  ],
+  "attached_networks": ["10.0.2.0/24"]
+}
