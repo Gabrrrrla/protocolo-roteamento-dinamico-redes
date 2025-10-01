@@ -21,11 +21,11 @@ def load_config(path):
 
 class RouterDaemon:
     def __init__(self, cfg):
-        self.neighbors_last_seen = {}
         self.cfg = cfg
         self.id = cfg['router_id']
         self.local_ip = cfg.get('local_ip', None)
         self.port = cfg.get('port', LSA_FLOOD_PORT)
+        self.neighbors_last_seen = {n['id']: 0 for n in self.cfg.get('neighbors', [])}
 
         # LSDB: dict key -> link_id, value -> {...}
         self.lsdb = {}
@@ -54,7 +54,7 @@ class RouterDaemon:
         threading.Thread(target=self.check_neighbors_loop, daemon=True).start()
 
         # mandando o advertise imediatamente pra que os vizinhos se conheçam
-        time.sleep(0.5)
+        time.sleep(2.0)
         self.advertise_links()
 
         # esperar um pouco pro lsa se proparar e entao tentar instalar as rotas nas redes conhecidas
@@ -158,7 +158,7 @@ class RouterDaemon:
         for n_config in self.cfg.get('neighbors', []):
             neighbor_id = n_config['id']
             # Só anuncia se o vizinho foi visto recentemente (está "vivo")
-            if neighbor_id in self.neighbors_last_seen:
+            if neighbor_id in self.neighbors_last_seen and self.neighbors_last_seen[neighbor_id] > 0:
                 local_iface_ip = n_config.get('local_ip', self.local_ip)
                 remote_iface_ip = n_config['ip']
                 link = {
@@ -313,7 +313,10 @@ class RouterDaemon:
                 if avail < bw_required:
                     continue
                 cost = link.get('cost', 1)
-                delay = link.get('delay', 1)
+                delay = link.get('delay_ms', 1)
+                capacity = link.get('capacity', 100)
+                reserved = self.reservations.get(lid, 0)
+                avail = max(capacity - reserved,1)
                 metric = cost + (delay / 100.0) + (1.0 / max(avail, 1))
                 ip_a = link.get('ip_a')
                 ip_b = link.get('ip_b') 

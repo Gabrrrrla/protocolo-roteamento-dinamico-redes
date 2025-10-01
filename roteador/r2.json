@@ -10,7 +10,8 @@
       "if": "r2-eth1",
       "local_ip": "10.1.12.2",
       "cost": 1,
-      "capacity": 50
+      "capacity": 50,
+      "delay_ms": 5
     },
     {
       "id": "r3",
@@ -19,7 +20,8 @@
       "if": "r2-eth2",
       "local_ip":"10.1.23.2",
       "cost": 1,
-      "capacity": 10
+      "capacity": 10,
+      "delay_ms": 20
     }
   ],
   "attached_networks": ["10.0.2.0/24"]
