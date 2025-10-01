@@ -8,6 +8,7 @@ import heapq
 import subprocess
 import ipaddress
 import traceback
+from pprint import pprint
 
 HELLO_INTERVAL = 2.0
 LSA_FLOOD_PORT = 50000
@@ -200,6 +201,10 @@ class RouterDaemon:
                 for link in msg.get('links', []):
                     lid = link.get('id')
                     self.lsdb[lid] = link
+
+                print(f"--- LSDB atualizado em {self.id} ---")
+                pprint(self.lsdb)
+                
             # re-flood to others (except where it came from)
             self.flood_lsa(msg, exclude_ip=addr[0])
             return
@@ -285,7 +290,7 @@ class RouterDaemon:
                 graph.setdefault(a, []).append((b, metric, lid, ip_b))  # to reach b, next hop ip is ip_b
                 graph.setdefault(b, []).append((a, metric, lid, ip_a))  # to reach a, next hop ip is ip_a
 
-        # Run Dijkstra from our router id
+        # aplica o Dijkstra a partir do roteador atual 
         dist = {self.id: 0}
         prev = {}
         heap = [(0, self.id)]

@@ -1,21 +1,26 @@
-# 🛰️ Protocolo de Roteamento Dinâmico com QoS
+# 🛰️ Protocolo de Roteamento Dinâmico com Métrica Composta
 
-Este projeto implementa um **protocolo de roteamento dinâmico baseado em estado de enlace (Link-State)**, inspirado em OSPF, mas com **métrica composta** e **roteamento ciente de capacidade**.  
+Este projeto implementa um protocolo de roteamento dinâmico baseado em **estado de enlace (Link-State)** em Python, projetado para ser executado no emulador de redes **Mininet**.
 
-O objetivo é selecionar não apenas o **caminho mais curto**, mas sim o **melhor caminho viável** que satisfaça os requisitos de largura de banda e qualidade de serviço (QoS) de cada aplicação.
+O objetivo do protocolo é superar as métricas de roteamento simples (como contagem de saltos) utilizando uma **métrica composta** que leva em consideração a **largura de banda** e a **latência** dos enlaces. Isso permite que a rede tome decisões mais inteligentes, escolhendo não apenas o caminho mais curto, mas o caminho de maior qualidade para o fluxo de dados.
 
 ---
 
-## Características
+## ⚙️ Como Funciona
 
-- **Link-State Routing**: cada roteador constrói um mapa completo da topologia.
-- **Flooding de LSAs**: troca de mensagens com vizinhos para manter a LSDB.
-- **Métrica composta**: combina largura de banda, atraso, confiabilidade e carga.
-- **CSPF (Constrained Shortest Path First)**:
-  1. **Viabilidade**: elimina caminhos que não atendem ao requisito de largura de banda.
-  2. **Qualidade**: escolhe o melhor caminho restante com base na métrica composta.
-- **Reservas de largura de banda**: cada fluxo aceito reduz a capacidade disponível nos enlaces.
-- **API HTTP**: interface para consultar estado, solicitar rotas e liberar fluxos.
+O protocolo é dividido em quatro componentes principais:
+
+1. **Descoberta de Vizinhança**  
+   Roteadores enviam pacotes `HELLO` (via UDP) para se descobrirem.
+
+2. **Disseminação de Topologia**  
+   As informações sobre os links e suas qualidades (banda, delay) são compartilhadas com toda a rede através de **Anúncios de Estado de Enlace (LSAs)**, montando um mapa completo da rede (LSDB) em cada roteador.
+
+3. **Algoritmo de Roteamento**  
+   Utilizando o mapa completo, o algoritmo de Dijkstra (`compute_cspf`) calcula a melhor rota para todos os destinos com base na métrica composta.
+
+4. **Gerenciamento da Rota**  
+   A melhor rota calculada é inserida na tabela de roteamento do **Kernel do Linux**, tornando a decisão efetiva para o tráfego de pacotes.
 
 ---
 
@@ -23,114 +28,129 @@ O objetivo é selecionar não apenas o **caminho mais curto**, mas sim o **melho
 
 ```
 protocolo-roteamento-dinamico/
-├── roteador.py
-├── topologia.py
-├── README.md 
-└── tests.sh
+└── ospf_comparacao/
+    ├── topologia_ospf.py            
+    ├── roteador            
+        ├── r1.conf
+        ├── r2.conf
+        └── r3.conf             
+├── estado_enlace_rot.py    # O daemon do protocolo de roteamento
+├── topologia.py            # Define a topologia da rede no Mininet
+└── roteador/
+    ├── r1.json             # Arquivos de configuração para cada
+    ├── r2.json             # roteador, definindo vizinhos
+    └── r3.json             # e redes locais.
 ```
 
 ---
 
-## ⚙️ Requisitos
+## ⚡ Requisitos
 
-- Linux com [Mininet](http://mininet.org/) instalado
-- Python 3.8+
-- Dependências Python:
-  ```bash
-  pip3 install aiohttp networkx
-  ```
+- Linux com Mininet instalado  
+- Python **3.8+**
 
 ---
 
-## Como usar
+## 🚀 Como Usar
 
 ### 1. Inicie a topologia no Mininet
+O script `topologia.py` já está configurado para iniciar a rede e o daemon de roteamento (`estado_enlace_rot.py`) em cada roteador automaticamente.
 
 ```bash
 sudo python3 topologia.py
 ```
 
-A topologia de exemplo cria 3 roteadores (`r1`, `r2`, `r3`) e 2 hosts (`h1`, `h2`).
+Ao iniciar, você verá o log de criação da rede e, em seguida, o prompt do Mininet (`mininet>`). A rede já estará convergindo.
 
 ---
 
-### 2. Inicie o daemon em cada roteador
+### 2. Verificando o Estado do Protocolo
 
+#### A. Verificando os Logs (o que o protocolo está pensando)
+Os arquivos `r1.log`, `r2.log` e `r3.log` são criados na mesma pasta onde você executou o comando `sudo`. Eles contêm informações valiosas sobre a troca de mensagens e a instalação de rotas.
+
+```bash
+# Em um novo terminal, fora do Mininet
+cat r1.log
+```
+
+#### B. Verificando a Tabela de Roteamento (a decisão final)
 No prompt do Mininet:
 
 ```bash
-r1 python3 roteador.py --id R1 --ip 10.0.0.1 --http-port 8001 --neighbors 10.0.0.2,10.0.0.3 &
-r2 python3 roteador.py --id R2 --ip 10.0.0.2 --http-port 8002 --neighbors 10.0.0.1,10.0.0.3 &
-r3 python3 roteador.py --id R3 --ip 10.0.0.3 --http-port 8003 --neighbors 10.0.0.1,10.0.0.2 &
+# Exibe a tabela de roteamento completa do roteador r1
+r1 ip route
+
+# Exibe a rota específica que r1 usaria para chegar em h3 (10.0.3.10)
+r1 ip route get 10.0.3.10
 ```
 
 ---
 
-### 3. Consultar o estado
+## 🧪 Experimento: Influenciando a Rota com as Métricas
 
-Ver a base de dados de estado de enlace (LSDB):
+Vamos forçá-lo a mudar de uma rota boa para uma rota "pior" (com mais saltos), mas que se torna a melhor opção devido a uma **mudança na latência**.
 
-```bash
-curl http://10.0.0.1:8001/lsdb
+### Passo 1: Entenda a métrica
+No arquivo `estado_enlace_rot.py`, a decisão de qual caminho é melhor é baseada nesta fórmula:
+
+```python
+metric = cost + (delay / 100.0) + (1.0 / max(avail, 1))
 ```
 
-Ver status de reservas:
+Isso significa que o protocolo prefere links com **baixo delay** e **alta banda disponível**.
 
-```bash
-curl http://10.0.0.1:8001/status
+---
+
+### Passo 2: Cenário base — A rota óbvia
+1. Inicie a topologia normalmente: 
+   ```bash
+   sudo python3 topologia.py
+   ```
+2. Aguarde 10 segundos para a rede convergir. 
+3. Verifique a rota de `h1` para `h3`: 
+   ```bash
+   r1 ip route get 10.0.3.10
+   ```
+   **Resultado esperado:** a rota será via `10.1.13.3 dev r1-eth2`, pois o link direto `r1 -> r3` é excelente (100 Mbps de banda, 1 ms de delay).
+
+---
+
+### Passo 3: Modifique a Métrica — A "Armadilha da Latência"
+1. Saia do Mininet (`exit`). 
+2. Abra o arquivo `topologia.py`. 
+3. Localize a linha que define o link entre `r1` e `r3`:
+
+```python
+# Linha original
+net.addLink(r1, r3, bw=100, delay='1ms')
 ```
 
----
+4. Altere o delay de `1ms` para `100ms`:
 
-### 4. Solicitar um caminho para um fluxo
-
-Exemplo: requisitar rota de `10.0.0.1 → 10.0.0.3` para um fluxo de **5 Mbps**:
-
-```bash
-curl -X POST -H "Content-Type: application/json" \
-     -d '{"src":"10.0.0.1","dst":"10.0.0.3","bw":5}' \
-     http://10.0.0.1:8001/request_path
+```python
+# Linha modificada
+net.addLink(r1, r3, bw=100, delay='100ms')
 ```
 
----
-
-### 5. Gerar tráfego de teste
-
-No Mininet:
-
-```bash
-h1 iperf3 -s &
-h2 iperf3 -c 10.0.1.1 -b 5M
-```
+5. Salve o arquivo.
 
 ---
 
-### 6. Simular falha de enlace
-
-```bash
-link r1 r3 down
-```
-
-O protocolo deve recalcular o caminho alternativo automaticamente.
-
----
-
-## 🧪 Experimentos sugeridos
-
-- **Admissão de fluxo**: tente requisitar mais banda do que disponível → deve ser rejeitado.
-- **Qualidade vs Hops**: verificar se caminhos de maior largura de banda são preferidos.
-- **Falhas**: derrubar links e medir tempo de convergência.
-- **Overhead de controle**: monitorar LSAs com `tcpdump`.
+### Passo 4: Verifique o novo comportamento
+1. Inicie novamente a topologia modificada: 
+   ```bash
+   sudo python3 topologia.py
+   ```
+2. Aguarde 10 segundos. 
+3. Verifique a rota de `h1` para `h3`: 
+   ```bash
+   r1 ip route get 10.0.3.10
+   ```
+   **Resultado esperado:** a rota agora será via `10.1.12.2 dev r1-eth1`.
 
 ---
 
-## 👥 Autoras
-
-- Luisa Becker dos Santos: Design e implementação do protocolo (algoritmos, LSAs, CSPF).
-- Gabriela BLey Rodrigues: Integração no Mininet, testes, análise de métricas.
-
----
-
-## 📜 Licença
-
-Projeto acadêmico para a disciplina de **Redes de Computadores: Internetworking, Roteamento e Transmissão (Unisinos)**.
+### Autoras:
+1. Gabriela Bley Rodrigues
+2. Luisa Becker dos Santos
