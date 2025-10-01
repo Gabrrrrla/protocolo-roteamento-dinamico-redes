@@ -82,7 +82,7 @@ No prompt do Mininet:
 r1 ip route
 
 # Exibe a rota específica que r1 usaria para chegar em h3 (10.0.3.10)
-r1 ip route get 10.0.3.10
+r1 ip route get h3
 ```
 
 ---
@@ -110,7 +110,7 @@ Isso significa que o protocolo prefere links com **baixo delay** e **alta banda 
 2. Aguarde 10 segundos para a rede convergir. 
 3. Verifique a rota de `h1` para `h3`: 
    ```bash
-   r1 ip route get 10.0.3.10
+   r1 ip route get h3
    ```
    **Resultado esperado:** a rota será via `10.1.13.3 dev r1-eth2`, pois o link direto `r1 -> r3` é excelente (100 Mbps de banda, 1 ms de delay).
 
@@ -118,21 +118,9 @@ Isso significa que o protocolo prefere links com **baixo delay** e **alta banda 
 
 ### Passo 3: Modifique a Métrica — A "Armadilha da Latência"
 1. Saia do Mininet (`exit`). 
-2. Abra o arquivo `topologia.py`. 
-3. Localize a linha que define o link entre `r1` e `r3`:
-
-```python
-# Linha original
-net.addLink(r1, r3, bw=100, delay='1ms')
-```
-
-4. Altere o delay de `1ms` para `100ms`:
-
-```python
-# Linha modificada
-net.addLink(r1, r3, bw=100, delay='100ms')
-```
-
+2. Abra o arquivo json de qualquer roteador que queira modificar a métrica. 
+3. Localize a linha que define o link entre `r1` e `r3`.
+4. Altere o delay, largura de banda ou custo.
 5. Salve o arquivo.
 
 ---
@@ -145,9 +133,8 @@ net.addLink(r1, r3, bw=100, delay='100ms')
 2. Aguarde 10 segundos. 
 3. Verifique a rota de `h1` para `h3`: 
    ```bash
-   r1 ip route get 10.0.3.10
+   r1 ip route get h3
    ```
-   **Resultado esperado:** a rota agora será via `10.1.12.2 dev r1-eth1`.
 
 ---
 
