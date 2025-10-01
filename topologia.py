@@ -34,7 +34,7 @@ def build():
                 intfName1='r2-eth2', params1={'ip': '10.1.23.2/24'},
                 intfName2='r3-eth1', params2={'ip': '10.1.23.3/24'})
     
-    net.addLink(r1, r3, bw=100, delay='1ms',
+    net.addLink(r1, r3, bw=100, delay='100ms',
                 intfName1='r1-eth2', params1={'ip': '10.1.13.1/24'},
                 intfName2='r3-eth2', params2={'ip': '10.1.13.3/24'})
 

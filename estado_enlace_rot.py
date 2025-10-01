@@ -13,6 +13,7 @@ from pprint import pprint
 HELLO_INTERVAL = 2.0
 LSA_FLOOD_PORT = 50000
 BUFFER_SIZE = 65535
+NEIGHBOR_DEAD_INTERVAL = HELLO_INTERVAL * 4
 
 def load_config(path):
     with open(path) as f:
@@ -20,6 +21,7 @@ def load_config(path):
 
 class RouterDaemon:
     def __init__(self, cfg):
+        self.neighbors_last_seen = {}
         self.cfg = cfg
         self.id = cfg['router_id']
         self.local_ip = cfg.get('local_ip', None)
@@ -49,6 +51,7 @@ class RouterDaemon:
     def start(self):
         threading.Thread(target=self.recv_loop, daemon=True).start()
         threading.Thread(target=self.hello_loop, daemon=True).start()
+        threading.Thread(target=self.check_neighbors_loop, daemon=True).start()
 
         # mandando o advertise imediatamente pra que os vizinhos se conheçam
         time.sleep(0.5)
@@ -68,7 +71,7 @@ class RouterDaemon:
         # pega as redes da lsdb + proprias redes adjacentes
         networks = set(self.attached_networks)
         with self.lsdb_lock:
-            for lid, link in self.lsdb.items():
+            for lid, link in list(self.lsdb.items()):
                 if 'network' in link:
                     networks.add(link['network'])
 
@@ -104,7 +107,11 @@ class RouterDaemon:
                 except Exception as e:
                     print(f"[{self.id}] bad msg decode from {addr}: {e}")
                     continue
-                self.handle_msg(msg, addr)
+                try:
+                    self.handle_msg(msg, addr)
+                except Exception as e:
+                    print(f"[{self.id}] handle_msg exception: {e}")
+                    traceback.print_exc()
             except Exception as e:
                 print(f"[{self.id}] recv_loop exception: {e}")
                 traceback.print_exc()
@@ -131,12 +138,12 @@ class RouterDaemon:
     # --------------------- LSA flood / advertise ---------------------
     def flood_lsa(self, lsa, exclude_ip=None):
         # inunda lsa pra todos os vizinhos 
-        lsa_json = json.dumps(lsa)
         for n in self.cfg.get('neighbors', []):
-            if n.get('ip') == exclude_ip:
+            if exclude_ip and n.get('ip') == exclude_ip:
                 continue
             try:
-                self.sock.sendto(lsa_json.encode(), (n['ip'], n.get('port', self.port)))
+                # usa send_msg p/ centralizar tratamento de erros/porta
+                self.send_msg(lsa, n.get('ip'), n.get('port', self.port))
             except Exception as e:
                 print(f"[{self.id}] flood err to {n.get('ip')}: {e}")
 
@@ -148,20 +155,23 @@ class RouterDaemon:
             "seq": int(time.time()),
             "links":[]
         }
-        for n in self.cfg.get('neighbors', []):
-            local_iface_ip = n.get('local_ip', self.local_ip)
-            remote_iface_ip = n['ip']
-            link = {
-                "id": f"{self.id}-{n['id']}",
-                "a": self.id,
-                "b": n['id'],
-                "capacity": n.get('capacity', 100),
-                "delay": n.get('delay_ms', 1),
-                "cost": n.get('cost', 1),
-                "ip_a": local_iface_ip,
-                "ip_b": remote_iface_ip
-            }
-            lsa['links'].append(link)
+        for n_config in self.cfg.get('neighbors', []):
+            neighbor_id = n_config['id']
+            # Só anuncia se o vizinho foi visto recentemente (está "vivo")
+            if neighbor_id in self.neighbors_last_seen:
+                local_iface_ip = n_config.get('local_ip', self.local_ip)
+                remote_iface_ip = n_config['ip']
+                link = {
+                    "id": f"{self.id}-{neighbor_id}",
+                    "a": self.id,
+                    "b": neighbor_id,
+                    "capacity": n_config.get('capacity', 100),
+                    "delay": n_config.get('delay_ms', 1),
+                    "cost": n_config.get('cost', 1),
+                    "ip_a": local_iface_ip,
+                    "ip_b": remote_iface_ip
+                }
+                lsa['links'].append(link)
         for net in self.attached_networks:
             lsa['links'].append({
                 "id": f"{self.id}-net-{net}",
@@ -178,8 +188,12 @@ class RouterDaemon:
         mtype = msg.get('type')
 
         if mtype == 'HELLO':
+            origin_id = msg.get('from')
+            if origin_id:
+                self.neighbors_last_seen[origin_id] = time.time()
             # reply ACK and advertise
             reply = {"type":"HELLO_ACK", "from":self.id}
+            # envia ACK para quem mandou o HELLO
             self.send_msg(reply, addr[0], addr[1])
             # advertise on HELLO to allow faster discovery
             self.advertise_links()
@@ -195,19 +209,36 @@ class RouterDaemon:
             key = (origin, seq)
             if key in self.seen_lsas:
                 return
+            # marca como visto antes de processar para evitar loops em caso de reentrância
             self.seen_lsas.add(key)
-            # update LSDB
-            with self.lsdb_lock:
-                for link in msg.get('links', []):
-                    lid = link.get('id')
-                    self.lsdb[lid] = link
+            lsdb_changed = False
+            try:
+                # update LSDB
+                with self.lsdb_lock:
+                    for link in msg.get('links', []):
+                        lid = link.get('id')
+                        # se não existir ou for diferente, atualiza e marca mudança
+                        if lid not in self.lsdb or self.lsdb[lid] != link:
+                            self.lsdb[lid] = link
+                            lsdb_changed = True
 
-                print(f"--- LSDB atualizado em {self.id} ---")
-                pprint(self.lsdb)
-                
-            # re-flood to others (except where it came from)
-            self.flood_lsa(msg, exclude_ip=addr[0])
+                    print(f"--- LSDB atualizado em {self.id} ---")
+                    pprint(self.lsdb)
+            except Exception as e:
+                print(f"[{self.id}] erro ao atualizar LSDB: {e}")
+                traceback.print_exc()
+
+            # re-flood to others (except where it veio)
+            try:
+                self.flood_lsa(msg, exclude_ip=addr[0])
+            except Exception as e:
+                print(f"[{self.id}] flood after LSA err: {e}")
+
+            if lsdb_changed:
+                print(f"[{self.id}] LSDB mudou. Reavaliando todas as rotas para garantir otimalidade.")
+                threading.Thread(target=self.bootstrap_install_routes, daemon=True).start()
             return
+        
 
         if mtype == 'REQUEST_ROUTE':
             dest = msg.get('dest')
@@ -232,10 +263,10 @@ class RouterDaemon:
             return
 
         if mtype == 'INSTALL_ROUTE':
-            dest_network = msg.get('dest') 
+            dest_network = msg.get('dest')
             next_hop = msg.get('next')
             print(f"[{self.id}] INSTALL_ROUTE received: install {dest_network} via {next_hop}")
-            self.install_kernel_route(dest_network, next_hop) 
+            self.install_kernel_route(dest_network, next_hop)
             return
 
         print(f"[{self.id}] unknown msg type: {mtype} from {addr}")
@@ -283,7 +314,7 @@ class RouterDaemon:
                     continue
                 cost = link.get('cost', 1)
                 delay = link.get('delay', 1)
-                metric = cost + (delay / 100.0) + (1.0 / max(avail, 1)) # aqui que é onde o negocio fica interessante
+                metric = cost + (delay / 100.0) + (1.0 / max(avail, 1))
                 ip_a = link.get('ip_a')
                 ip_b = link.get('ip_b') 
                 # store edges carrying also the interface IP to use as next-hop
@@ -325,7 +356,6 @@ class RouterDaemon:
             # find in lsdb the link between self.id and first_hop[0] to obtain our local interface IP
             our_iface_ip = self.local_ip
             with self.lsdb_lock:
-                # search for a link where a==self and b==first_hop[0] or inverse
                 for lid, link in self.lsdb.items():
                     if link.get('a') == self.id and link.get('b') == first_hop[0]:
                         our_iface_ip = link.get('ip_a', our_iface_ip)
@@ -343,6 +373,7 @@ class RouterDaemon:
 
     # --------------------- install path / kernel routes ---------------------
     def install_path(self, path, dest_ip, bw):
+        # reserva largura de banda nas arestas do caminho
         for i in range(len(path)-1):
             cur = path[i]
             nxt = path[i+1]
@@ -361,17 +392,24 @@ class RouterDaemon:
 
         for i in range(len(path)-1):
             this_router_id = path[i][0]
-            next_hop_ip = path[i+1][2] 
-            
+            next_hop_ip = path[i+1][2]
+
             # converte o IP de destino para o endereço da rede (ex: 10.0.3.10 -> 10.0.3.0/24)
-            dest_net = ipaddress.ip_interface(f"{dest_ip}/24").network
+            try:
+                # tenta inferir máscara se dest_ip já for uma rede
+                if '/' in str(dest_ip):
+                    dest_net = ipaddress.ip_network(dest_ip, strict=False)
+                else:
+                    # fallback: assume /24
+                    dest_net = ipaddress.ip_interface(f"{dest_ip}/24").network
+            except Exception:
+                dest_net = ipaddress.ip_interface(f"{dest_ip}/24").network
 
             if this_router_id == self.id:
                 print(f"[{self.id}] install local route to {dest_net} -> via {next_hop_ip}")
                 self.install_kernel_route(str(dest_net), next_hop_ip) # Envia a rede
             else:
                 # manda um INSTALL_ROUTE pro roteador
-                # acha um ip que dê pra achar o roteador (seja por neighbor mapping ou LSDB)
                 target_ip = None
                 # olha nas config dos neighbors pelo id
                 n = self.neigh_by_id.get(this_router_id)
@@ -388,7 +426,6 @@ class RouterDaemon:
                                 target_ip = link.get('ip_b')
                                 break
                 if target_ip:
-                    # envia a rede na mensagem em vez do IP de host
                     msg = {"type":"INSTALL_ROUTE", "dest": str(dest_net), "next": next_hop_ip}
                     print(f"[{self.id}] sending INSTALL_ROUTE to {this_router_id} ({target_ip}) instructing install {dest_net} via {next_hop_ip}")
                     self.send_msg(msg, target_ip)
@@ -406,6 +443,54 @@ class RouterDaemon:
         except Exception as e:
             print(f"[{self.id}] route install exception for {dest_network} via {next_hop}: {e}")
             traceback.print_exc()
+
+    def check_neighbors_loop(self):
+        while True:
+            now = time.time()
+            dead_neighbors = []
+            for neighbor_id, last_seen_time in list(self.neighbors_last_seen.items()):
+                if now - last_seen_time > NEIGHBOR_DEAD_INTERVAL:
+                    print(f"[{self.id}] Vizinho {neighbor_id} considerado MORTO! (Timeout)")
+                    dead_neighbors.append(neighbor_id)
+
+            if dead_neighbors:
+                # Chame uma função para limpar os links desse vizinho
+                self.handle_dead_neighbors(dead_neighbors)
+
+            time.sleep(HELLO_INTERVAL)
+
+    def handle_dead_neighbors(self, dead_neighbors):
+        links_to_remove = []
+        # 1. Encontrar todos os links que envolvem o(s) vizinho(s) morto(s)
+        with self.lsdb_lock:
+            for link_id, link_data in list(self.lsdb.items()):
+                # Um link é considerado morto se uma de suas pontas for um dos vizinhos caídos
+                if link_data.get('a') in dead_neighbors or link_data.get('b') in dead_neighbors:
+                    links_to_remove.append(link_id)
+
+            # 2. Remover os links mortos da base de dados local (LSDB) e limpar reservas
+            for link_id in links_to_remove:
+                if link_id in self.lsdb:
+                    print(f"[{self.id}] Removendo link morto {link_id} do LSDB.")
+                    del self.lsdb[link_id]
+                # também remover qualquer reserva associada
+                if link_id in self.reservations:
+                    print(f"[{self.id}] Limpando reserva associada ao link {link_id}.")
+                    del self.reservations[link_id]
+
+        # 3. Se alguma mudança foi feita no LSDB, reagir à mudança de topologia
+        if links_to_remove:
+            # Primeiro, removemos oficialmente o vizinho da nossa lista de vizinhos "vivos"
+            for neighbor_id in dead_neighbors:
+                if neighbor_id in self.neighbors_last_seen:
+                    del self.neighbors_last_seen[neighbor_id]
+
+            # Anuncia para a rede nosso novo estado de links (agora sem os links para o vizinho caído)
+            self.advertise_links()
+
+            # Recalcula e reinstala todas as nossas rotas com base no novo mapa da rede
+            print(f"[{self.id}] Recalculando todas as rotas devido à queda de vizinho...")
+            threading.Thread(target=self.bootstrap_install_routes, daemon=True).start()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
