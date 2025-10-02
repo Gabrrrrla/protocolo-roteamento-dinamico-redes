@@ -322,7 +322,7 @@ class RouterDaemon:
                 if avail < bw_required:
                     continue
                 cost = link.get('cost', 1)
-                delay = link.get('delay_ms', 1)
+                delay = link.get('delay', 1)
                 capacity = link.get('capacity', 100)
                 reserved = self.reservations.get(lid, 0)
                 avail = max(capacity - reserved,1)

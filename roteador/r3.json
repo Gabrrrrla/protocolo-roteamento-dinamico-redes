@@ -19,9 +19,9 @@
       "port": 50000,
       "if": "r3-eth2",
       "local_ip": "10.1.13.3",
-      "cost": 20, 
+      "cost": 1, 
       "capacity": 100,
-      "delay_ms": 10
+      "delay_ms": 100
     }
   ],
   "attached_networks": ["10.0.3.0/24"]
