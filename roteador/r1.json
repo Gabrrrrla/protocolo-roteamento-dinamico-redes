@@ -19,7 +19,7 @@
       "port":50000,
       "if":"r1-eth2",
       "local_ip":"10.1.13.1",
-      "cost":1,
+      "cost": 20,
       "capacity":100,
       "delay_ms": 10
     }

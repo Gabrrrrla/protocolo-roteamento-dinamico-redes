@@ -10,10 +10,11 @@ import ipaddress
 import traceback
 from pprint import pprint
 
-HELLO_INTERVAL = 2.0
+HELLO_INTERVAL = 1.0
+NEIGHBOR_DEAD_INTERVAL = 2.5
 LSA_FLOOD_PORT = 50000
 BUFFER_SIZE = 65535
-NEIGHBOR_DEAD_INTERVAL = HELLO_INTERVAL * 4
+
 
 def load_config(path):
     with open(path) as f:
@@ -137,30 +138,37 @@ class RouterDaemon:
 
     # --------------------- LSA flood / advertise ---------------------
     def flood_lsa(self, lsa, exclude_ip=None):
-        # inunda lsa pra todos os vizinhos 
+        now = time.time()
         for n in self.cfg.get('neighbors', []):
-            if exclude_ip and n.get('ip') == exclude_ip:
+            dest_ip = n.get('ip')
+            # skip excluded IP
+            if exclude_ip and dest_ip == exclude_ip:
                 continue
-            try:
-                # usa send_msg p/ centralizar tratamento de erros/porta
-                self.send_msg(lsa, n.get('ip'), n.get('port', self.port))
-            except Exception as e:
-                print(f"[{self.id}] flood err to {n.get('ip')}: {e}")
+            # only flood to neighbors seen recently (alive)
+            last_seen = self.neighbors_last_seen.get(n['id'], 0)
+            if now - last_seen <= NEIGHBOR_DEAD_INTERVAL:
+                try:
+                    # centraliza envio com send_msg (tratamento de erros já dentro)
+                    self.send_msg(lsa, dest_ip, n.get('port', self.port))
+                except Exception as e:
+                    # send_msg já faz print em erro, mas mantemos log aqui por segurança
+                    print(f"[{self.id}] flood_lsa err to {dest_ip}: {e}")
 
     def advertise_links(self):
-        # cria o lsa com links locais e as attached networks
         lsa = {
-            "type":"LSA_LINK",
-            "origin":self.id,
+            "type": "LSA_LINK",
+            "origin": self.id,
             "seq": int(time.time()),
-            "links":[]
+            "links": []
         }
+        now = time.time()
         for n_config in self.cfg.get('neighbors', []):
             neighbor_id = n_config['id']
-            # Só anuncia se o vizinho foi visto recentemente (está "vivo")
-            if neighbor_id in self.neighbors_last_seen and self.neighbors_last_seen[neighbor_id] > 0:
+            # announce only if neighbor seen recently (alive)
+            last_seen = self.neighbors_last_seen.get(neighbor_id, 0)
+            if now - last_seen <= NEIGHBOR_DEAD_INTERVAL:
                 local_iface_ip = n_config.get('local_ip', self.local_ip)
-                remote_iface_ip = n_config['ip']
+                remote_iface_ip = n_config.get('ip')
                 link = {
                     "id": f"{self.id}-{neighbor_id}",
                     "a": self.id,
@@ -172,6 +180,7 @@ class RouterDaemon:
                     "ip_b": remote_iface_ip
                 }
                 lsa['links'].append(link)
+
         for net in self.attached_networks:
             lsa['links'].append({
                 "id": f"{self.id}-net-{net}",
@@ -179,7 +188,7 @@ class RouterDaemon:
                 "b": "NET",
                 "network": net
             })
-        # manda pros vizinhos
+
         print(f"[{self.id}] advertising LSA (links={len(lsa['links'])})")
         self.flood_lsa(lsa)
 
@@ -328,7 +337,9 @@ class RouterDaemon:
         dist = {self.id: 0}
         prev = {}
         heap = [(0, self.id)]
+        print(self.id, dest_router)
         while heap:
+            print(heap)
             d, u = heapq.heappop(heap)
             if u == dest_router:
                 break
